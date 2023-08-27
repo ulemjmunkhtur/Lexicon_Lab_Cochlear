@@ -1,0 +1,329 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.manifold import TSNE
+
+from switch import switch_simdrop
+
+
+def read_files(file):
+    # Read the file
+    with open(file, 'r') as f:
+        lines = f.readlines()
+
+    # Skip the first line 
+    lines = lines[1:]
+
+    # Split each line into a list of values
+    lines = [line.strip().split() for line in lines]
+
+    # Separate the words from the numeric representations
+    words = [line[0] for line in lines]
+    embeddings = [list(map(float, line[1:])) for line in lines]
+
+    # Create a dictionary where the keys are the words and the values are the 50 word embeddings
+    dict_embeddings = dict(zip(words, embeddings))
+
+    return dict_embeddings
+
+w2v = read_files('/Users/ulemjmunkhtur/Desktop/cochlear_project/ULEMJ_cochlear/word2vec.txt')
+s2v = read_files('/Users/ulemjmunkhtur/Desktop/cochlear_project/ULEMJ_cochlear/speech2vec.txt')
+intersecting_words = set(w2v.keys()).intersection(set(s2v.keys()))
+
+
+combined_dict = {}
+for word in intersecting_words:
+    word_dict = {}
+    word_dict['w2v'] = w2v[word]
+    word_dict['s2v'] = s2v[word]
+
+    # putting a dictionary inside a dictionary so there would be both w2v and s2v embeddings 
+    #you can call 
+    combined_dict[word] = word_dict
+
+
+#read data_cochlear into a dataframe using pandas
+dc = pd.read_csv('data-cochlear.txt', sep="\t", header=None)
+dc.columns = ["Participant", "Animal"]
+
+class Similarity:
+    def __init__(self, w2v, s2v, dc):
+        self.w2v = w2v
+        self.s2v= s2v
+        self.dc = dc
+
+    def cosine_similarity(self, word1, word2, model):
+        # Choose the model based on the 'model' argument
+        if model == 'w2v':
+            mod = self.w2v
+        elif model == 's2v':
+            mod = self.s2v
+        else:
+            raise ValueError("Invalid model. Choose 'w2v' or 's2v'.")
+
+        if word1 not in mod or word2 not in mod:
+            return 0  # or whatever default value you want to use
+
+        # Get the embeddings for the words
+        embedding1 = mod[word1]
+        embedding2 = mod[word2]
+
+        # Compute the cosine similarity
+        cos_sim = np.dot(embedding1, embedding2) / (np.linalg.norm(embedding1) * np.linalg.norm(embedding2))
+
+        return cos_sim
+
+    def visualize_items(self, ID):
+        #puts all the animals a given participant said into a numpy array
+        to_visualize = self.dc[self.dc['Participant'] == ID]['Animal'].values
+
+        w2v_embed = []
+        s2v_embed = []
+        for word in to_visualize:
+            if word in self.w2v.keys() and word in self.s2v.keys():
+                w2v_embed.append(self.w2v[word])
+                s2v_embed.append(self.s2v[word])
+
+        w2v_embed = np.array(w2v_embed)
+        s2v_embed = np.array(s2v_embed)
+      
+        tsne = TSNE(n_components=2, random_state=0, perplexity=10)
+        w2v_2d = tsne.fit_transform(w2v_embed)
+        s2v_2d = tsne.fit_transform(s2v_embed)
+
+        
+        
+        #plot for w2v
+        for word, coordinates in zip(to_visualize, w2v_2d):
+            plt.scatter(*coordinates, color='green')
+            plt.text(*coordinates, word, fontsize=9)
+        plt.title(f'word2vec embeddings for participant {ID}')
+        plt.show()
+        
+
+        # plot for speech2vec
+     
+        for word, coordinates in zip(to_visualize, s2v_2d):
+            plt.scatter(*coordinates, color="blue")
+            plt.text(*coordinates, word, fontsize=9)
+        plt.title(f'speech2vec embeddings for participant {ID}')
+        plt.show()
+
+        #plot that shows both of them at once
+        plt.figure(figsize=(12, 12))
+        for word, coordinates in zip(to_visualize, w2v_2d):
+            plt.scatter(*coordinates, color="blue", s=50)
+            plt.text(*coordinates, "  w2v: " + word, fontsize=8)
+        for word, coordinates in zip(to_visualize, s2v_2d):
+             plt.scatter(*coordinates, color="red")
+             plt.text(*coordinates, " s2v: " + word, fontsize=8)
+        plt.title(f'w2v + s2v embeddings for participant {ID}')
+        plt.show()
+
+        
+
+
+        
+
+    def pairwise_similarity(self, data):
+        results = pd.DataFrame(columns=['Participant', 'Word1', 'Word2', 'Similarity_W2V', 'Similarity_S2V'])
+
+        participants = self.dc['Participant'].unique()
+
+
+        for participant in participants:
+            words = self.dc[self.dc['Participant'] == participant]['Animal'].values
+            similarity_s2v = 0
+            similarity_w2v = 0
+            for i in range(len(words) - 1):
+                    # Get the current word and the next word
+                    word1 = words[i]
+                    word2 = words[i + 1]
+
+                    # If this is the first pair of words, the similarity is 2
+                    if i == 0:
+                        similarity_s2v = 2
+                        similarity_w2v = 2
+                    else:
+                        # Otherwise, compute the cosine similarity
+                        similarity_w2v = self.cosine_similarity(word1, word2, 'w2v')  # or 's2v', depending on the model you want to use
+                        similarity_s2v = self.cosine_similarity(word1, word2, 's2v') 
+
+                    # Append the results to the DataFrame
+                    new_row = pd.DataFrame({'Participant': [participant], 'Word1': [word1], 'Word2': [word2], 'Similarity_W2V': [similarity_w2v], 'Similarity_S2V': [similarity_s2v]})
+                    results = pd.concat([results, new_row], ignore_index=True)
+
+
+        return results
+
+
+class Clusters:
+    def __init__(self, w2v, s2v, dc):
+        self.word2vec = w2v
+        self.speech2vec = s2v
+        self.data_cochlear = dc
+
+    def switch_simdrop(size, semantic_similarity):
+        '''
+            Similarity Drop Switch Method from Hills TT, Jones MN, Todd (2012).
+            
+            Args:
+                fluency_list (list, size = L): fluency list to predict switches on
+                semantic_similarity (list, size = L): a list of semantic similarities between items in the fluency list
+            Returns:
+                a list, size L, of switches, where 0 = no switch, 1 = switch, 2 = boundary case
+        '''
+        simdrop = []
+        for k in range(size):
+            if (k > 0 and k < (len(size)-1)): 
+                # simdrop
+                if (semantic_similarity[k+1] > semantic_similarity[k]) and (semantic_similarity[k-1] > semantic_similarity[k]):
+                    simdrop.append(1)
+                
+                else:
+                    simdrop.append(0)
+
+            else:
+                simdrop.append(2)
+
+        return simdrop
+  
+    
+    def compute_clusters(self, data):
+        
+        similarity = Similarity(w2v, s2v, dc) 
+        df = similarity.pairwise_similarity(data)
+
+        print(df)
+
+        w2v_clusters = {}
+        w2v_switches = {}
+        s2v_clusters = {}
+        s2v_switches = {}
+
+        list_similarity_w2v = []
+        list_similarity_s2v = []
+        for index, row in df.iterrows():
+            list_similarity_w2v.append(row['Similarity_W2V'])
+            list_similarity_s2v.append(row['Similarity_S2V'])
+
+        w2v_simdrop = switch_simdrop(len(df['Word1']), list_similarity_w2v  )
+        s2v_simdrop = switch_simdrop(len(df['Word1']), list_similarity_s2v)
+
+        w2v_clusters = []
+        w2v_switches = []
+        idx = 0
+        while idx < len(w2v_simdrop):
+            if w2v_simdrop[idx] == 0:
+                w2v_clusters.append(list_similarity_w2v[idx])
+                w2v_switches.append(None)
+                idx += 1
+            elif w2v_simdrop[idx] == 1:
+                w2v_switches.append(list_similarity_w2v[idx])
+                w2v_clusters.append(None)
+                idx += 1
+            else:
+                idx += 1
+                w2v_switches.append(None)
+                w2v_clusters.append(None)
+        
+        s2v_clusters = []
+        s2v_switches = []
+        idx = 0
+        while idx < len(s2v_simdrop):
+            if s2v_simdrop[idx] == 0:
+                s2v_clusters.append(list_similarity_s2v[idx])
+                s2v_switches.append(None)
+                idx += 1
+            elif s2v_simdrop[idx] == 1:
+                s2v_switches.append(list_similarity_s2v[idx])
+                s2v_clusters.append(None)
+                idx += 1
+            else:
+                idx += 1
+                s2v_switches.append(None)
+                s2v_clusters.append(None)
+        
+        # print(len(df['Participant']))
+        # print(len(w2v_clusters))
+        # print(len(w2v_switches))
+        # print(len(s2v_clusters))
+        # print(len(s2v_switches))
+        data = {'Participant': df['Participant'], 'W2V Words': w2v_clusters, 'W2V Switches': w2v_switches, 'S2V Words': s2v_clusters, 'S2V Switches': s2v_switches}
+       
+        
+
+        df_clusters = pd.DataFrame(data)
+    
+        # save the dataframe to a CSV file
+        df_clusters.to_csv('compute_clusters.csv', index=False)
+    
+        return df_clusters
+
+    
+
+
+
+    def visualize_clusters(self, ID):
+        # implementation here
+        df_clusters = self.compute_clusters(dc)
+
+        df_id = df_clusters[df_clusters['Participant'] == ID]
+
+        mean_w2v_clusters = df_id['W2V Words'].mean()
+        mean_w2v_switches = df_id['W2V Switches'].mean()
+        mean_s2v_clusters = df_id['S2V Words'].mean()
+        mean_s2v_switches = df_id['S2V Switches'].mean()
+
+
+        plotdata = pd.DataFrame({
+
+        "Clusters":[mean_w2v_clusters, mean_s2v_clusters],
+
+        "Switches":[mean_w2v_switches, mean_s2v_switches]}, index=["Clusters", "Switches"])
+
+        bar_graph = plotdata.plot(kind="bar",figsize=(15, 8), color=['green', 'red'])
+        for p in bar_graph.patches:
+            bar_graph.annotate(str(round(p.get_height(), 2)), (p.get_x() + p.get_width() / 2., p.get_height()), ha='center', va='center', xytext=(0, 10), textcoords='offset points')
+        
+
+        plt.title('Mean Clusters and Switches for ID: ' + ID)
+        plt.ylabel("Mean")
+        bar_graph.legend(labels=["Word2Vec", "Speech2Vec"], title="Models")
+
+        plt.show()
+
+        
+
+        
+
+
+# creating a similarity object 
+similarity = Similarity(w2v, s2v, dc)
+
+# testing cosine_similarity() with diff words
+w1 = 'his'
+w2 = 'with'
+print(f"Cosine similarity between '{w1}' and '{w2}': {similarity.cosine_similarity(w1, w2, 'w2v')}")
+
+#testing the cosine_similarity function with identical words
+word1 = word2 = 'her'
+print(f"Cosine similarity between '{w1}' and '{w2}': {similarity.cosine_similarity(word1, word2, 'w2v')}")
+
+#testing visualize_items 
+similarity.visualize_items('CAF-657')
+
+
+#testing pairwise_similarity 
+df = similarity.pairwise_similarity('CAF-657')
+print(df)
+
+
+Clusters = Clusters(w2v, s2v, dc)
+
+#testing compute_clusters
+df_clusters = Clusters.compute_clusters(dc)
+print(df_clusters)
+
+#testing visualize_clusters
+Clusters.visualize_clusters('CAF-657')
